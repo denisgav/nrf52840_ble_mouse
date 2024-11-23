@@ -1,0 +1,5 @@
+board:
+  name: bt_mouse_demo
+  vendor: supermini
+  socs:
+    - name: nrf52840
