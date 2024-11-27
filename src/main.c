@@ -582,7 +582,7 @@ static void mouse_handler(struct k_work *work)
 {
 	struct mouse_pos pos;
 
-	while (!k_msgq_get(&hids_queue, &pos, K_NO_WAIT)) {
+	while (!k_msgq_get(&hids_queue, &pos, K_FOREVER)) {
 		mouse_movement_send(pos.x_val, pos.y_val);
 	}
 }
@@ -780,13 +780,25 @@ void configure_buttons(void)
 
 static void bas_notify(void)
 {
+	static uint32_t last_bas_notify_time = 0;
+	static const uint32_t BAS_NOTIFY_PERIOD_MS = 1000; // Notify each second
+	uint32_t cur_time = k_uptime_get();
+
+	if(cur_time < (last_bas_notify_time + BAS_NOTIFY_PERIOD_MS)){
+		return;
+	}
+
+	last_bas_notify_time = cur_time;
+
 	uint8_t battery_level = bt_bas_get_battery_level();
 
-	battery_level--;
+	// battery_level--;
 
-	if (!battery_level) {
-		battery_level = 100U;
-	}
+	// if (!battery_level) {
+	// 	battery_level = 100U;
+	// }
+
+	battery_level = 100U;
 
 	bt_bas_set_battery_level(battery_level);
 }
@@ -811,8 +823,49 @@ static int configure_adc(void){
 	return 0;
 }
 
+static bool has_active_connection(){
+	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
+		if (!conn_mode[i].conn) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static int16_t convert_analog_joystick_to_mouse_pos(int32_t val_mv){
+	int32_t val_mv_tmp = val_mv - 2048;
+
+	val_mv_tmp = (val_mv_tmp >= 0x8000) ? -(0xFFFF - val_mv_tmp + 1) : val_mv_tmp;
+
+	val_mv_tmp = val_mv - 2048;
+	if(val_mv_tmp <= 0){
+		if(val_mv_tmp <= -1024)
+			return -4;
+		if(val_mv_tmp <= -512)
+			return -2;
+	} else {
+		if(val_mv_tmp >= 1024)
+			return 4;
+		if(val_mv_tmp >= 512)
+			return 2;
+	}
+	
+	return 0;
+}
+
 static void read_joystick(void){
-	static uint32_t count = 0;
+	static uint32_t last_joystick_read_time = 0;
+	static const uint32_t JOYSTICK_READ_PERIOD_MS = 50; 
+	uint32_t cur_time = k_uptime_get();
+
+	if(cur_time < (last_joystick_read_time + JOYSTICK_READ_PERIOD_MS)){
+		return;
+	}
+
+	last_joystick_read_time = cur_time;
+
+
+	//static uint32_t count = 0;
 	static uint16_t buf;
 	static struct adc_sequence sequence = {
 		.buffer = &buf,
@@ -822,13 +875,18 @@ static void read_joystick(void){
 
 	int err;
 
-	printk("ADC reading[%u]:\n", count++);
+	struct mouse_pos pos;
+	memset(&pos, 0, sizeof(struct mouse_pos));
+	int32_t adc_val_mvX = 0;
+	int32_t adc_val_mvY = 0;
+
+	//printk("ADC reading[%u]:\n", count++);
 	for (size_t i = 0U; i < ARRAY_SIZE(adc_channels); i++) {
 		int32_t val_mv;
 
-		printk("- %s, channel %d: ",
-				adc_channels[i].dev->name,
-				adc_channels[i].channel_id);
+		// printk("- %s, channel %d: ",
+		// 		adc_channels[i].dev->name,
+		// 		adc_channels[i].channel_id);
 
 		(void)adc_sequence_init_dt(&adc_channels[i], &sequence);
 
@@ -848,14 +906,36 @@ static void read_joystick(void){
 		} else {
 			val_mv = (int32_t)buf;
 		}
-		printk("%"PRId32, val_mv);
-		err = adc_raw_to_millivolts_dt(&adc_channels[i],
-							&val_mv);
-		/* conversion to mV may not be supported, skip if not */
-		if (err < 0) {
-			printk(" (value in mV not available)\n");
+
+		if(i==0){
+			adc_val_mvY = val_mv;
+			pos.y_val = convert_analog_joystick_to_mouse_pos(adc_val_mvY);
 		} else {
-			printk(" = %"PRId32" mV\n", val_mv);
+			adc_val_mvX = val_mv;
+			pos.x_val = -convert_analog_joystick_to_mouse_pos(adc_val_mvX);
+		}
+
+		// printk("%"PRId32, val_mv);
+		// printk("\n");
+		// err = adc_raw_to_millivolts_dt(&adc_channels[i],
+		// 					&val_mv);
+		// /* conversion to mV may not be supported, skip if not */
+		// if (err < 0) {
+		// 	printk(" (value in mV not available)\n");
+		// } else {
+		// 	printk(" = %"PRId32" mV\n", val_mv);
+		// }
+	}
+
+	if((pos.x_val != 0) || (pos.y_val != 0)){
+		printk("X: %"PRId32" Y: %"PRId32". ADC valX %"PRId32" valY %"PRId32"\n", pos.x_val, pos.y_val, adc_val_mvX, adc_val_mvY);
+		err = k_msgq_put(&hids_queue, &pos, K_FOREVER);
+		if (err) {
+			printk("No space in the queue for button pressed\n");
+			return;
+		}
+		if (k_msgq_num_used_get(&hids_queue) == 1) {
+			k_work_submit(&hids_work);
 		}
 	}
 }
@@ -909,11 +989,16 @@ int main(void)
 	configure_adc();
 
 	while (1) {
-		k_sleep(K_SECONDS(1));
-		/* Battery level simulation */
-		bas_notify();
-		/* Read joystick */
-		read_joystick();
+		//k_sleep(K_SECONDS(1));
+		k_msleep(1);
+
+		if(has_active_connection()){
+			/* Battery level simulation */
+			bas_notify();
+
+			/* Read joystick */
+			read_joystick();
+		}
 	}
 
 }

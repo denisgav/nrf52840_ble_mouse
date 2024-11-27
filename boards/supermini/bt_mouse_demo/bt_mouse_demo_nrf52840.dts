@@ -137,6 +137,7 @@ zephyr_udc0: &usbd {
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN0>; /* P0.02 */
 		zephyr,resolution = <12>;
+		// zephyr,differential;
 	};
 
 	channel@5 {
@@ -146,5 +147,6 @@ zephyr_udc0: &usbd {
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN5>; /* P0.29 */
 		zephyr,resolution = <12>;
+		// zephyr,differential;
 	};
 };
