@@ -39,28 +39,28 @@
 	buttons {
 		compatible = "gpio-keys";
 		btn1: btn_1 {
-			gpios = <&gpio0 6 0>;
+			gpios = <&gpio1 15 0>;
 			label = "BTN_0";
 		};
 
 		btn2: btn_2 {
-			gpios = <&gpio0 8 0>;
+			gpios = <&gpio1 13 0>;
 			label = "BTN_1";
 		};
 
 		btn3: btn_3 {
-			gpios = <&gpio0 17 0>;
-			label = "BTN_2";
+			gpios = <&gpio1 11 0>;
+			label = "BTN_LEFT_MOUSE";
 		};
 
 		btn4: btn_4 {
-			gpios = <&gpio0 20 0>;
-			label = "BTN_3";
+			gpios = <&gpio0 10 0>;
+			label = "BTN_RIGHT_MOUSE";
 		};
 	};
 
 	zephyr,user {
-		io-channels = <&adc 0>, <&adc 5>;
+		io-channels = <&adc 0>, <&adc 5>, <&adc 7>;
 	};
 };
 
@@ -132,7 +132,7 @@ zephyr_udc0: &usbd {
 
 	channel@0 {
 		reg = <0>;
-		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,gain = "ADC_GAIN_1_5";
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN0>; /* P0.02 */
@@ -146,6 +146,16 @@ zephyr_udc0: &usbd {
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
 		zephyr,input-positive = <NRF_SAADC_AIN5>; /* P0.29 */
+		zephyr,resolution = <12>;
+		// zephyr,differential;
+	};
+
+	channel@7 {
+		reg = <7>;
+		zephyr,gain = "ADC_GAIN_1_5";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,input-positive = <NRF_SAADC_AIN7>; /* P0.31 */
 		zephyr,resolution = <12>;
 		// zephyr,differential;
 	};

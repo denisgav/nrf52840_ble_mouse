@@ -58,7 +58,7 @@
 #define INPUT_REP_REF_MPLAYER_ID    3
 
 /* HIDs queue size. */
-#define HIDS_QUEUE_SIZE 10
+#define HIDS_QUEUE_SIZE 16
 
 /* Key used to move cursor left */
 #define KEY_LEFT_MASK   DK_BTN1_MSK
@@ -79,15 +79,37 @@ BT_HIDS_DEF(hids_obj,
 	    INPUT_REP_MOVEMENT_LEN,
 	    INPUT_REP_MEDIA_PLAYER_LEN);
 
-static struct k_work hids_work;
 struct mouse_pos {
 	int16_t x_val;
 	int16_t y_val;
 };
 
-/* Mouse movement queue. */
-K_MSGQ_DEFINE(hids_queue,
-	      sizeof(struct mouse_pos),
+struct mouse_buttons_scroll_pan {
+	uint8_t buttons;
+	int8_t scroll;
+	int8_t pan;
+};
+
+struct mouse_hid_report{
+	struct mouse_pos pos;
+	struct mouse_buttons_scroll_pan buttons_scroll_pan;
+};
+
+struct mouse_player_buttons {
+	uint8_t buttons;
+};
+
+static struct k_work hids_work;
+
+/* Mouse movement, buttons+scroll pan queue. */
+K_MSGQ_DEFINE(hids_mouse_hid_queue,
+	      sizeof(struct mouse_hid_report),
+	      HIDS_QUEUE_SIZE,
+	      4);
+
+/* Mouse buttons player buttons queue. */
+K_MSGQ_DEFINE(hids_mouse_player_buttons_queue,
+	      sizeof(struct mouse_player_buttons),
 	      HIDS_QUEUE_SIZE,
 	      4);
 
@@ -281,7 +303,7 @@ static void insert_conn_object(struct bt_conn *conn)
 static bool is_conn_slot_free(void)
 {
 	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
-		if (!conn_mode[i].conn) {
+		if (conn_mode[i].conn) {
 			return true;
 		}
 	}
@@ -531,7 +553,7 @@ static void hid_init(void)
 }
 
 
-static void mouse_movement_send(int16_t x_delta, int16_t y_delta)
+static void mouse_movement_buttons_scroll_pan_send(int16_t x_delta, int16_t y_delta, uint8_t buttons, int8_t scroll, int8_t pan)
 {
 	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
 
@@ -545,14 +567,15 @@ static void mouse_movement_send(int16_t x_delta, int16_t y_delta)
 
 			bt_hids_boot_mouse_inp_rep_send(&hids_obj,
 							     conn_mode[i].conn,
-							     NULL,
+							     &buttons,
 							     (int8_t) x_delta,
 							     (int8_t) y_delta,
 							     NULL);
 		} else {
 			uint8_t x_buff[2];
 			uint8_t y_buff[2];
-			uint8_t buffer[INPUT_REP_MOVEMENT_LEN];
+			uint8_t buffer_mouse_pos[INPUT_REP_MOVEMENT_LEN];
+			uint8_t buffer_buttons_scroll_pan[INPUT_REP_BUTTONS_LEN];
 
 			int16_t x = MAX(MIN(x_delta, 0x07ff), -0x07ff);
 			int16_t y = MAX(MIN(y_delta, 0x07ff), -0x07ff);
@@ -562,30 +585,38 @@ static void mouse_movement_send(int16_t x_delta, int16_t y_delta)
 			sys_put_le16(y, y_buff);
 
 			/* Encode report. */
-			BUILD_ASSERT(sizeof(buffer) == 3,
+			BUILD_ASSERT(sizeof(buffer_mouse_pos) == 3,
 					 "Only 2 axis, 12-bit each, are supported");
 
-			buffer[0] = x_buff[0];
-			buffer[1] = (y_buff[0] << 4) | (x_buff[1] & 0x0f);
-			buffer[2] = (y_buff[1] << 4) | (y_buff[0] >> 4);
+			buffer_mouse_pos[0] = x_buff[0];
+			buffer_mouse_pos[1] = (y_buff[0] << 4) | (x_buff[1] & 0x0f);
+			buffer_mouse_pos[2] = (y_buff[1] << 4) | (y_buff[0] >> 4);
 
 
 			bt_hids_inp_rep_send(&hids_obj, conn_mode[i].conn,
 						  INPUT_REP_MOVEMENT_INDEX,
-						  buffer, sizeof(buffer), NULL);
+						  buffer_mouse_pos, sizeof(buffer_mouse_pos), NULL);
+
+			buffer_buttons_scroll_pan[0] = buttons;
+			buffer_buttons_scroll_pan[1] = scroll;
+			buffer_buttons_scroll_pan[2] = pan;
+
+			bt_hids_inp_rep_send(&hids_obj, conn_mode[i].conn,
+						  INPUT_REP_BUTTONS_INDEX,
+						  buffer_buttons_scroll_pan, sizeof(buffer_buttons_scroll_pan), NULL);
 		}
 	}
 }
 
-
-static void mouse_handler(struct k_work *work)
+static void mouse_hid_handler(struct k_work *work)
 {
-	struct mouse_pos pos;
+	struct mouse_hid_report hid_report;
 
-	while (!k_msgq_get(&hids_queue, &pos, K_FOREVER)) {
-		mouse_movement_send(pos.x_val, pos.y_val);
+	while (!k_msgq_get(&hids_mouse_hid_queue, &hid_report, K_NO_WAIT)) {
+		mouse_movement_buttons_scroll_pan_send(hid_report.pos.x_val, hid_report.pos.y_val, hid_report.buttons_scroll_pan.buttons, hid_report.buttons_scroll_pan.scroll, hid_report.buttons_scroll_pan.pan);
 	}
 }
+
 
 #if defined(CONFIG_BT_HIDS_SECURITY_ENABLED)
 static void auth_passkey_display(struct bt_conn *conn, unsigned int passkey)
@@ -731,39 +762,39 @@ void button_changed(uint32_t button_state, uint32_t has_changed)
 		}
 	}
 
-	if (buttons & KEY_LEFT_MASK) {
-		pos.x_val -= MOVEMENT_SPEED;
-		printk("%s(): left\n", __func__);
-		data_to_send = true;
-	}
-	if (buttons & KEY_UP_MASK) {
-		pos.y_val -= MOVEMENT_SPEED;
-		printk("%s(): up\n", __func__);
-		data_to_send = true;
-	}
-	if (buttons & KEY_RIGHT_MASK) {
-		pos.x_val += MOVEMENT_SPEED;
-		printk("%s(): right\n", __func__);
-		data_to_send = true;
-	}
-	if (buttons & KEY_DOWN_MASK) {
-		pos.y_val += MOVEMENT_SPEED;
-		printk("%s(): down\n", __func__);
-		data_to_send = true;
-	}
+	// if (buttons & KEY_LEFT_MASK) {
+	// 	pos.x_val -= MOVEMENT_SPEED;
+	// 	printk("%s(): left\n", __func__);
+	// 	data_to_send = true;
+	// }
+	// if (buttons & KEY_UP_MASK) {
+	// 	pos.y_val -= MOVEMENT_SPEED;
+	// 	printk("%s(): up\n", __func__);
+	// 	data_to_send = true;
+	// }
+	// if (buttons & KEY_RIGHT_MASK) {
+	// 	pos.x_val += MOVEMENT_SPEED;
+	// 	printk("%s(): right\n", __func__);
+	// 	data_to_send = true;
+	// }
+	// if (buttons & KEY_DOWN_MASK) {
+	// 	pos.y_val += MOVEMENT_SPEED;
+	// 	printk("%s(): down\n", __func__);
+	// 	data_to_send = true;
+	// }
 
-	if (data_to_send) {
-		int err;
+	// if (data_to_send) {
+	// 	int err;
 
-		err = k_msgq_put(&hids_queue, &pos, K_NO_WAIT);
-		if (err) {
-			printk("No space in the queue for button pressed\n");
-			return;
-		}
-		if (k_msgq_num_used_get(&hids_queue) == 1) {
-			k_work_submit(&hids_work);
-		}
-	}
+	// 	err = k_msgq_put(&hids_mouse_pos_queue, &pos, K_NO_WAIT);
+	// 	if (err) {
+	// 		printk("No space in the queue for button pressed\n");
+	// 		return;
+	// 	}
+	// 	if (k_msgq_num_used_get(&hids_mouse_pos_queue) == 1) {
+	// 		k_work_submit(&hids_work);
+	// 	}
+	// }
 }
 
 
@@ -825,7 +856,7 @@ static int configure_adc(void){
 
 static bool has_active_connection(){
 	for (size_t i = 0; i < CONFIG_BT_HIDS_MAX_CLIENT_COUNT; i++) {
-		if (!conn_mode[i].conn) {
+		if (conn_mode[i].conn) {
 			return true;
 		}
 	}
@@ -875,8 +906,8 @@ static void read_joystick(void){
 
 	int err;
 
-	struct mouse_pos pos;
-	memset(&pos, 0, sizeof(struct mouse_pos));
+	struct mouse_hid_report hid_report;
+	memset(&hid_report, 0, sizeof(struct mouse_hid_report));
 	int32_t adc_val_mvX = 0;
 	int32_t adc_val_mvY = 0;
 
@@ -907,14 +938,22 @@ static void read_joystick(void){
 			val_mv = (int32_t)buf;
 		}
 
-		if(i==0){
-			adc_val_mvY = val_mv;
-			pos.y_val = convert_analog_joystick_to_mouse_pos(adc_val_mvY);
-		} else {
-			adc_val_mvX = val_mv;
-			pos.x_val = -convert_analog_joystick_to_mouse_pos(adc_val_mvX);
+		switch(i){
+			case 0:{
+				adc_val_mvY = val_mv;
+				hid_report.pos.y_val = convert_analog_joystick_to_mouse_pos(adc_val_mvY);
+				break;
+			}
+			case 1:{
+				adc_val_mvX = val_mv;
+				hid_report.pos.x_val = -convert_analog_joystick_to_mouse_pos(adc_val_mvX);
+				break;
+			}
+			default:{ // Scroll
+				break;
+			}
 		}
-
+		
 		// printk("%"PRId32, val_mv);
 		// printk("\n");
 		// err = adc_raw_to_millivolts_dt(&adc_channels[i],
@@ -927,14 +966,14 @@ static void read_joystick(void){
 		// }
 	}
 
-	if((pos.x_val != 0) || (pos.y_val != 0)){
-		printk("X: %"PRId32" Y: %"PRId32". ADC valX %"PRId32" valY %"PRId32"\n", pos.x_val, pos.y_val, adc_val_mvX, adc_val_mvY);
-		err = k_msgq_put(&hids_queue, &pos, K_FOREVER);
+	if((hid_report.pos.x_val != 0) || (hid_report.pos.y_val != 0)){
+		printk("X: %"PRId32" Y: %"PRId32". ADC valX %"PRId32" valY %"PRId32"\n", hid_report.pos.x_val, hid_report.pos.y_val, adc_val_mvX, adc_val_mvY);
+		err = k_msgq_put(&hids_mouse_hid_queue, &hid_report, K_FOREVER);
 		if (err) {
 			printk("No space in the queue for button pressed\n");
 			return;
 		}
-		if (k_msgq_num_used_get(&hids_queue) == 1) {
+		if (k_msgq_num_used_get(&hids_mouse_hid_queue) >= 1) {
 			k_work_submit(&hids_work);
 		}
 	}
@@ -972,7 +1011,7 @@ int main(void)
 
 	printk("Bluetooth initialized\n");
 
-	k_work_init(&hids_work, mouse_handler);
+	k_work_init(&hids_work, mouse_hid_handler);
 	k_work_init(&adv_work, advertising_process);
 	if (IS_ENABLED(CONFIG_BT_HIDS_SECURITY_ENABLED)) {
 		k_work_init(&pairing_work, pairing_process);
